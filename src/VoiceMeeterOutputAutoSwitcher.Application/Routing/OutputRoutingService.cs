@@ -10,6 +10,8 @@ namespace VoiceMeeterOutputAutoSwitcher.Application.Routing;
 /// </summary>
 public sealed class OutputRoutingService : IAsyncDisposable
 {
+    private static readonly TimeSpan HealthCheckInterval = TimeSpan.FromMinutes(1);
+
     private readonly IAudioDeviceWatcher _deviceWatcher;
     private readonly IVoiceMeeterOutputController _voiceMeeter;
     private readonly IAppSettingsRepository _settingsRepository;
@@ -17,6 +19,9 @@ public sealed class OutputRoutingService : IAsyncDisposable
     private readonly SemaphoreSlim _syncLock = new(1, 1);
 
     private CancellationTokenSource? _debounceCts;
+    private PeriodicTimer? _healthTimer;
+    private Task? _healthLoop;
+    private CancellationTokenSource? _healthCts;
     private RoutingState _lastApplied = RoutingState.Empty;
     private bool _started;
     private bool _disposed;
@@ -58,6 +63,10 @@ public sealed class OutputRoutingService : IAsyncDisposable
         _deviceWatcher.Start();
         _started = true;
 
+        _healthCts = new CancellationTokenSource();
+        _healthTimer = new PeriodicTimer(HealthCheckInterval);
+        _healthLoop = RunHealthLoopAsync(_healthCts.Token);
+
         // Startup sync (no debounce wait beyond a short settle is still OK; run immediately).
         await SyncAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -72,9 +81,9 @@ public sealed class OutputRoutingService : IAsyncDisposable
         _deviceWatcher.DeviceChanged -= OnDeviceChanged;
         _deviceWatcher.Stop();
         CancelDebounce();
+        await StopHealthLoopAsync().ConfigureAwait(false);
         _started = false;
         _logger.LogInformation("Output routing service stopped.");
-        await Task.CompletedTask.ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -92,6 +101,73 @@ public sealed class OutputRoutingService : IAsyncDisposable
         _disposed = true;
     }
 
+    private async Task RunHealthLoopAsync(CancellationToken cancellationToken)
+    {
+        if (_healthTimer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            while (await _healthTimer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                try
+                {
+                    var devices = _deviceWatcher.GetPlaybackDevices(activeOnly: false);
+                    if (devices.Count == 0)
+                    {
+                        _logger.LogWarning(
+                            "Health check: playback enumeration returned 0 devices (enumerator may have been reset).");
+                    }
+
+                    // Catch missed notifications after long idle / sleep.
+                    await SyncAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Health check failed.");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // shutdown
+        }
+    }
+
+    private async Task StopHealthLoopAsync()
+    {
+        if (_healthCts is not null)
+        {
+            await _healthCts.CancelAsync().ConfigureAwait(false);
+        }
+
+        _healthTimer?.Dispose();
+        _healthTimer = null;
+
+        if (_healthLoop is not null)
+        {
+            try
+            {
+                await _healthLoop.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // expected
+            }
+
+            _healthLoop = null;
+        }
+
+        _healthCts?.Dispose();
+        _healthCts = null;
+    }
+
     private void OnDeviceChanged(object? sender, AudioDeviceChangedEventArgs e)
     {
         // PropertyChanged fires in bursts during Bluetooth connect and was resetting
@@ -99,8 +175,7 @@ public sealed class OutputRoutingService : IAsyncDisposable
         if (e.ChangeKind == AudioDeviceChangeKind.PropertyChanged)
         {
             _logger.LogDebug(
-                "Ignoring PropertyChanged for debounce: {Name} ({EndpointId})",
-                e.Device?.FriendlyName ?? "(unknown)",
+                "Ignoring PropertyChanged for debounce: {EndpointId}",
                 e.EndpointId);
             return;
         }
@@ -157,6 +232,13 @@ public sealed class OutputRoutingService : IAsyncDisposable
         {
             var settings = _settingsRepository.Load();
             var playbackDevices = _deviceWatcher.GetPlaybackDevices(activeOnly: false);
+            if (playbackDevices.Count == 0)
+            {
+                _logger.LogWarning(
+                    "Playback device enumeration returned 0 devices; skipping VoiceMeeter update.");
+                return;
+            }
+
             var desired = RoutingPolicy.Resolve(settings.ManagedDevices, playbackDevices);
 
             _logger.LogInformation(

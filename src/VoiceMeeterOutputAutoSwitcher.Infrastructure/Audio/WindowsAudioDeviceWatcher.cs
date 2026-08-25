@@ -10,8 +10,9 @@ namespace VoiceMeeterOutputAutoSwitcher.Infrastructure.Audio;
 /// </summary>
 public sealed class WindowsAudioDeviceWatcher : IAudioDeviceWatcher
 {
-    private readonly MMDeviceEnumerator _enumerator;
+    private readonly object _gate = new();
     private readonly NotificationClient _notificationClient;
+    private MMDeviceEnumerator _enumerator;
     private bool _watching;
     private bool _disposed;
 
@@ -27,6 +28,110 @@ public sealed class WindowsAudioDeviceWatcher : IAudioDeviceWatcher
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
+        lock (_gate)
+        {
+            try
+            {
+                var devices = EnumerateUnlocked(activeOnly);
+                // An empty render list is effectively impossible on a normal desktop; treat as stale COM.
+                if (devices.Count == 0)
+                {
+                    RecreateEnumeratorUnlocked();
+                    devices = EnumerateUnlocked(activeOnly);
+                }
+
+                return devices;
+            }
+            catch (Exception)
+            {
+                RecreateEnumeratorUnlocked();
+                return EnumerateUnlocked(activeOnly);
+            }
+        }
+    }
+
+    public AudioDevice? TryGetPlaybackDevice(string endpointId)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpointId);
+
+        lock (_gate)
+        {
+            try
+            {
+                return TryGetUnlocked(endpointId);
+            }
+            catch (Exception)
+            {
+                try
+                {
+                    RecreateEnumeratorUnlocked();
+                    return TryGetUnlocked(endpointId);
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+            }
+        }
+    }
+
+    public void Start()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_gate)
+        {
+            if (_watching)
+            {
+                return;
+            }
+
+            _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
+            _watching = true;
+        }
+    }
+
+    public void Stop()
+    {
+        lock (_gate)
+        {
+            if (!_watching || _disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                _enumerator.UnregisterEndpointNotificationCallback(_notificationClient);
+            }
+            catch (Exception)
+            {
+                // Best-effort unregister.
+            }
+
+            _watching = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        Stop();
+        lock (_gate)
+        {
+            _enumerator.Dispose();
+            _disposed = true;
+        }
+
+        GC.SuppressFinalize(this);
+    }
+
+    private List<AudioDevice> EnumerateUnlocked(bool activeOnly)
+    {
         var stateMask = activeOnly ? DeviceState.Active : DeviceState.All;
         var collection = _enumerator.EnumerateAudioEndPoints(DataFlow.Render, stateMask);
 
@@ -49,87 +154,74 @@ public sealed class WindowsAudioDeviceWatcher : IAudioDeviceWatcher
             .ToList();
     }
 
-    public AudioDevice? TryGetPlaybackDevice(string endpointId)
+    private AudioDevice? TryGetUnlocked(string endpointId)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentException.ThrowIfNullOrWhiteSpace(endpointId);
-
-        try
-        {
-            using var device = _enumerator.GetDevice(endpointId);
-            if (device.DataFlow != DataFlow.Render)
-            {
-                return null;
-            }
-
-            return MapDevice(device);
-        }
-        catch (Exception)
+        using var device = _enumerator.GetDevice(endpointId);
+        if (device.DataFlow != DataFlow.Render)
         {
             return null;
         }
+
+        return MapDevice(device);
     }
 
-    public void Start()
+    private void RecreateEnumeratorUnlocked()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        var wasWatching = _watching;
         if (_watching)
         {
-            return;
-        }
+            try
+            {
+                _enumerator.UnregisterEndpointNotificationCallback(_notificationClient);
+            }
+            catch (Exception)
+            {
+                // ignored
+            }
 
-        _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
-        _watching = true;
-    }
-
-    public void Stop()
-    {
-        if (!_watching || _disposed)
-        {
-            return;
+            _watching = false;
         }
 
         try
         {
-            _enumerator.UnregisterEndpointNotificationCallback(_notificationClient);
+            _enumerator.Dispose();
         }
         catch (Exception)
         {
-            // Best-effort unregister.
+            // ignored
         }
 
-        _watching = false;
-    }
+        _enumerator = new MMDeviceEnumerator();
 
-    public void Dispose()
-    {
-        if (_disposed)
+        if (wasWatching)
         {
-            return;
+            _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
+            _watching = true;
         }
-
-        Stop();
-        _enumerator.Dispose();
-        _disposed = true;
-        GC.SuppressFinalize(this);
     }
 
-    private void RaiseDeviceChanged(AudioDeviceChangeKind kind, string endpointId)
+    private void OnNativeNotification(AudioDeviceChangeKind kind, string endpointId)
     {
-        AudioDevice? snapshot = null;
-        if (kind != AudioDeviceChangeKind.Removed)
+        // Core Audio callbacks arrive on a non-UI COM thread. Do not touch MMDeviceEnumerator here;
+        // only queue a lightweight event so SyncAsync can re-enumerate on a safer path.
+        ThreadPool.QueueUserWorkItem(_ =>
         {
-            snapshot = TryGetPlaybackDevice(endpointId);
-            // Capture endpoints also fire notifications; keep playback-only signal.
-            if (snapshot is null)
+            if (_disposed)
             {
                 return;
             }
-        }
 
-        DeviceChanged?.Invoke(
-            this,
-            new AudioDeviceChangedEventArgs(kind, endpointId, snapshot));
+            try
+            {
+                DeviceChanged?.Invoke(
+                    this,
+                    new AudioDeviceChangedEventArgs(kind, endpointId, device: null));
+            }
+            catch (Exception)
+            {
+                // Never let callback-path exceptions tear down the process.
+            }
+        });
     }
 
     private static AudioDevice MapDevice(MMDevice device) =>
@@ -158,20 +250,20 @@ public sealed class WindowsAudioDeviceWatcher : IAudioDeviceWatcher
         }
 
         public void OnDeviceStateChanged(string deviceId, DeviceState newState) =>
-            _owner.RaiseDeviceChanged(AudioDeviceChangeKind.StateChanged, deviceId);
+            _owner.OnNativeNotification(AudioDeviceChangeKind.StateChanged, deviceId);
 
         public void OnDeviceAdded(string pwstrDeviceId) =>
-            _owner.RaiseDeviceChanged(AudioDeviceChangeKind.Added, pwstrDeviceId);
+            _owner.OnNativeNotification(AudioDeviceChangeKind.Added, pwstrDeviceId);
 
         public void OnDeviceRemoved(string deviceId) =>
-            _owner.RaiseDeviceChanged(AudioDeviceChangeKind.Removed, deviceId);
+            _owner.OnNativeNotification(AudioDeviceChangeKind.Removed, deviceId);
 
         public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
         {
-            // Default device changes are out of MVP scope.
+            // Out of MVP scope.
         }
 
         public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) =>
-            _owner.RaiseDeviceChanged(AudioDeviceChangeKind.PropertyChanged, pwstrDeviceId);
+            _owner.OnNativeNotification(AudioDeviceChangeKind.PropertyChanged, pwstrDeviceId);
     }
 }

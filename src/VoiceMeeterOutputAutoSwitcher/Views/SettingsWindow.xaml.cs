@@ -49,6 +49,16 @@ public partial class SettingsWindow : Window
             .OrderBy(d => d.FriendlyName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        if (devices.Count == 0)
+        {
+            _logger.LogWarning("Settings: playback enumeration returned 0 devices.");
+            System.Windows.MessageBox.Show(
+                "再生デバイスを取得できませんでした。\nしばらく待って「再読み込み」を押すか、アプリを再起動してください。",
+                Title,
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+
         _rows.Clear();
 
         // Managed first (by priority), then unmanaged.

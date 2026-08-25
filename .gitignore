@@ -1,0 +1,35 @@
+# Build
+**/bin/
+**/obj/
+**/out/
+**/publish/
+
+# IDE / OS
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.DotSettings.user
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / local settings (runtime files live under AppData; keep accidental copies out of git)
+*.log
+logs/
+**/settings.local.json
+**/tmp-settings.json
+**/settings.json
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.pfx
+*.pem
+*.key
+
+# NuGet
+*.nupkg
+packages/

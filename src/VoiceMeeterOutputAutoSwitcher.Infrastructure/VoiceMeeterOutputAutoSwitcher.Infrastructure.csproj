@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>VoiceMeeterOutputAutoSwitcher.Infrastructure</RootNamespace>
+    <Description>Windows / VoiceMeeter integration adapters.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <ProjectReference Include="..\VoiceMeeterOutputAutoSwitcher.Core\VoiceMeeterOutputAutoSwitcher.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VoiceMeeterOutputAutoSwitcher.Application\VoiceMeeterOutputAutoSwitcher.Application.csproj" />
+  </ItemGroup>
+
+</Project>

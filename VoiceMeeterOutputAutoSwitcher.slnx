@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VoiceMeeterOutputAutoSwitcher.Application/VoiceMeeterOutputAutoSwitcher.Application.csproj" />
+    <Project Path="src/VoiceMeeterOutputAutoSwitcher.Core/VoiceMeeterOutputAutoSwitcher.Core.csproj" />
+    <Project Path="src/VoiceMeeterOutputAutoSwitcher.Infrastructure/VoiceMeeterOutputAutoSwitcher.Infrastructure.csproj" />
+    <Project Path="src/VoiceMeeterOutputAutoSwitcher/VoiceMeeterOutputAutoSwitcher.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VoiceMeeterOutputAutoSwitcher.Core.Tests/VoiceMeeterOutputAutoSwitcher.Core.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/OutputRoutingSpike/OutputRoutingSpike.csproj" />
+    <Project Path="tools/VoiceMeeterApiSpike/VoiceMeeterApiSpike.csproj" />
+    <Project Path="tools/WindowsAudioDeviceSpike/WindowsAudioDeviceSpike.csproj" />
+  </Folder>
+</Solution>
